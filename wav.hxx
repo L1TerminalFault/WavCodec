@@ -118,10 +118,21 @@ private:
     return sample / 2147483648.0f;
   }
 
-  static inline bool isPCMGuid(const uint8_t *guid) { return guid[0] == 0x01; }
+  static constexpr uint8_t KSDATAFORMAT_SUBTYPE_PCM[16] = {
+      0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+      0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71};
+
+  static constexpr uint8_t KSDATAFORMAT_SUBTYPE_IEEE_FLOAT[16] = {
+      0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
+      0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71};
+
+  static inline bool isPCMGuid(const uint8_t *guid) {
+
+    return memcmp(guid, KSDATAFORMAT_SUBTYPE_PCM, 16) == 0;
+  }
 
   static inline bool isFloatGuid(const uint8_t *guid) {
-    return guid[0] == 0x03;
+    return memcmp(guid, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, 16) == 0;
   }
 
   static float decodeALawSample(uint8_t value) {
@@ -164,19 +175,19 @@ private:
       switch (bytesPerSample) {
 
       case 1:
-        audioType = AudioType::PCM8;
+        audioType = PCM8;
         break;
 
       case 2:
-        audioType = AudioType::PCM16;
+        audioType = PCM16;
         break;
 
       case 3:
-        audioType = AudioType::PCM24;
+        audioType = PCM24;
         break;
 
       case 4:
-        audioType = AudioType::PCM32;
+        audioType = PCM32;
         break;
 
       default:
@@ -208,9 +219,9 @@ private:
 
     fseek(file, location, SEEK_SET);
 
-    std::vector<uint8_t> raw(sampleCount);
+    uint8_t raw[sampleCount];
 
-    fread(raw.data(), sizeof(uint8_t), sampleCount, file);
+    fread(raw, sizeof(uint8_t), sampleCount, file);
 
     for (int i = 0; i < sampleCount; ++i)
       output[i] = pcm8_to_float(raw[i]);
@@ -222,9 +233,9 @@ private:
 
     fseek(file, location, SEEK_SET);
 
-    std::vector<int16_t> raw(sampleCount);
+    int16_t raw[sampleCount];
 
-    fread(raw.data(), sizeof(int16_t), sampleCount, file);
+    fread(raw, sizeof(int16_t), sampleCount, file);
 
     for (int i = 0; i < sampleCount; ++i)
       output[i] = pcm16_to_float(raw[i]);
@@ -236,9 +247,9 @@ private:
 
     fseek(file, location, SEEK_SET);
 
-    std::vector<uint8_t> raw(sampleCount * 3);
+    uint8_t raw[sampleCount * 3];
 
-    fread(raw.data(), 1, sampleCount * 3, file);
+    fread(raw, 1, sampleCount * 3, file);
 
     for (int i = 0; i < sampleCount; ++i) {
 
@@ -260,9 +271,9 @@ private:
 
     fseek(file, location, SEEK_SET);
 
-    std::vector<int32_t> raw(sampleCount);
+    int32_t raw[sampleCount];
 
-    fread(raw.data(), sizeof(int32_t), sampleCount, file);
+    fread(raw, sizeof(int32_t), sampleCount, file);
 
     for (int i = 0; i < sampleCount; ++i)
       output[i] = pcm32_to_float(raw[i]);
@@ -283,9 +294,9 @@ private:
 
     fseek(file, location, SEEK_SET);
 
-    std::vector<uint8_t> raw(sampleCount);
+    uint8_t raw[sampleCount];
 
-    fread(raw.data(), sizeof(uint8_t), sampleCount, file);
+    fread(raw, sizeof(uint8_t), sampleCount, file);
 
     for (int i = 0; i < sampleCount; ++i)
       output[i] = decodeALawSample(raw[i]);
@@ -297,9 +308,9 @@ private:
 
     fseek(file, location, SEEK_SET);
 
-    std::vector<uint8_t> raw(sampleCount);
+    uint8_t raw[sampleCount];
 
-    fread(raw.data(), sizeof(uint8_t), sampleCount, file);
+    fread(raw, sizeof(uint8_t), sampleCount, file);
 
     for (int i = 0; i < sampleCount; ++i)
       output[i] = decodeMuLawSample(raw[i]);
