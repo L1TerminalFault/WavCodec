@@ -4,17 +4,17 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <ios>
 #include <mutex>
-#include <queue>
 #include <stdexcept>
 #include <thread>
-#include <vector>
 
-constexpr static inline int DECODE_BUFFER_SAMPLES = 16384;
-constexpr static inline int MAX_QUEUE_BUFFERS = 8;
+constexpr static inline size_t DECODE_BUFFER_SAMPLES = 16384;
+constexpr static inline size_t MAX_QUEUE_BUFFERS = 8;
 
 enum AudioFormat : int {
   PCM = 1,
@@ -62,31 +62,34 @@ struct FMT_Extensible {
 };
 
 struct AudioChunk {
-  std::vector<float> samples;
-  int frames = 0;
+  alignas(16) float samples[DECODE_BUFFER_SAMPLES];
+  size_t frames = 0;
+  size_t sampleCount = 0;
 };
 
 class WavCodec {
 private:
-  FILE *file = nullptr;
+  FILE *file;
+  std::mutex streamMutex;
 
-  int audioFormat = 0;
-  int sampleRate = 0;
-  int channels = 0;
-  int bytesPerSample = 0;
-  int frameSize = 0;
+  size_t audioFormat = 0;
+  size_t sampleRate = 0;
+  size_t channels = 0;
+  size_t bytesPerSample = 0;
+  size_t frameSize = 0;
 
-  int totalFrames = 0;
-  int totalSamples = 0;
+  size_t totalFrames = 0;
+  size_t totalSamples = 0;
 
-  int audioDataOffset = 0;
-  int audioDataSize = 0;
+  off_t audioDataOffset = 0;
+  size_t audioDataSize = 0;
 
   AudioType audioType = AudioType::PCM16;
 
   struct {
     std::atomic<int> currentFrameIndex{0};
     std::atomic<bool> isPlaying{false};
+    std::atomic<bool> isPaused{false};
     std::atomic<bool> stopRequested{false};
     std::atomic<bool> seekRequested{false};
     std::atomic<int> seekFrame{0};
@@ -95,10 +98,16 @@ private:
   std::thread decodeThread;
   std::thread playbackThread;
 
-  std::queue<AudioChunk> queue;
+  AudioChunk ringBuffer[MAX_QUEUE_BUFFERS];
+  size_t ringBufferHead = 0;
+  size_t ringBufferTail = 0;
+  size_t ringBufferSize = 0;
+  // std::queue<AudioChunk> queue;
   std::mutex queueMutex;
   std::condition_variable queueNotEmpty;
   std::condition_variable queueNotFull;
+
+  static inline void (*decodeFn)(WavCodec *, float *, int, int) = nullptr;
 
   snd_pcm_t *pcmHandle = nullptr;
 
@@ -215,27 +224,32 @@ private:
 
   void decodePCM8(float *output, int sampleOffset, int sampleCount) {
 
-    long location = audioDataOffset + sampleOffset;
-
-    fseek(file, location, SEEK_SET);
-
-    uint8_t raw[sampleCount];
-
-    fread(raw, sizeof(uint8_t), sampleCount, file);
-
-    for (int i = 0; i < sampleCount; ++i)
-      output[i] = pcm8_to_float(raw[i]);
+    // off_t location = audioDataOffset + sampleOffset;
+    //
+    // fseek(file, location, SEEK_SET);
+    //
+    // uint8_t raw[sampleCount];
+    //
+    // fread(raw, sizeof(uint8_t), sampleCount, file);
+    //
+    // for (int i = 0; i < sampleCount; ++i)
+    //   output[i] = pcm8_to_float(raw[i]);
   }
 
   void decodePCM16(float *output, int sampleOffset, int sampleCount) {
 
-    long location = audioDataOffset + (sampleOffset * sizeof(int16_t));
+    off_t location = audioDataOffset + (sampleOffset * sizeof(int16_t));
 
-    fseek(file, location, SEEK_SET);
+    alignas(16) thread_local int16_t raw[DECODE_BUFFER_SAMPLES];
 
-    int16_t raw[sampleCount];
-
-    fread(raw, sizeof(int16_t), sampleCount, file);
+    {
+      std::lock_guard<std::mutex> lock(streamMutex);
+      // file.seekg(location, std::ios::beg);
+      fseek(file, location, SEEK_SET);
+      // file.read(reinterpret_cast<char *>(raw), sizeof(int16_t) *
+      // sampleCount);
+      fread(raw, sizeof(int16_t), sampleCount, file);
+    }
 
     for (int i = 0; i < sampleCount; ++i)
       output[i] = pcm16_to_float(raw[i]);
@@ -243,109 +257,123 @@ private:
 
   void decodePCM24(float *output, int sampleOffset, int sampleCount) {
 
-    long location = audioDataOffset + (sampleOffset * 3);
-
-    fseek(file, location, SEEK_SET);
-
-    uint8_t raw[sampleCount * 3];
-
-    fread(raw, 1, sampleCount * 3, file);
-
-    for (int i = 0; i < sampleCount; ++i) {
-
-      int idx = i * 3;
-
-      int32_t sample =
-          (raw[idx + 0]) | (raw[idx + 1] << 8) | (raw[idx + 2] << 16);
-
-      if (sample & 0x800000)
-        sample |= ~0xFFFFFF;
-
-      output[i] = pcm24_to_float(sample);
-    }
+    // long location = audioDataOffset + (sampleOffset * 3);
+    //
+    // fseek(file, location, SEEK_SET);
+    //
+    // uint8_t raw[sampleCount * 3];
+    //
+    // fread(raw, 1, sampleCount * 3, file);
+    //
+    // for (int i = 0; i < sampleCount; ++i) {
+    //
+    //   int idx = i * 3;
+    //
+    //   int32_t sample =
+    //       (raw[idx + 0]) | (raw[idx + 1] << 8) | (raw[idx + 2] << 16);
+    //
+    //   if (sample & 0x800000)
+    //     sample |= ~0xFFFFFF;
+    //
+    //   output[i] = pcm24_to_float(sample);
+    // }
   }
 
   void decodePCM32(float *output, int sampleOffset, int sampleCount) {
 
-    long location = audioDataOffset + (sampleOffset * sizeof(int32_t));
-
-    fseek(file, location, SEEK_SET);
-
-    int32_t raw[sampleCount];
-
-    fread(raw, sizeof(int32_t), sampleCount, file);
-
-    for (int i = 0; i < sampleCount; ++i)
-      output[i] = pcm32_to_float(raw[i]);
+    // long location = audioDataOffset + (sampleOffset * sizeof(int32_t));
+    //
+    // fseek(file, location, SEEK_SET);
+    //
+    // int32_t raw[sampleCount];
+    //
+    // fread(raw, sizeof(int32_t), sampleCount, file);
+    //
+    // for (int i = 0; i < sampleCount; ++i)
+    //   output[i] = pcm32_to_float(raw[i]);
   }
 
   void decodeIEEEFloat(float *output, int sampleOffset, int sampleCount) {
 
-    long location = audioDataOffset + (sampleOffset * sizeof(float));
-
-    fseek(file, location, SEEK_SET);
-
-    fread(output, sizeof(float), sampleCount, file);
+    // long location = audioDataOffset + (sampleOffset * sizeof(float));
+    //
+    // fseek(file, location, SEEK_SET);
+    //
+    // fread(output, sizeof(float), sampleCount, file);
   }
 
   void decodeALaw(float *output, int sampleOffset, int sampleCount) {
 
-    long location = audioDataOffset + sampleOffset;
-
-    fseek(file, location, SEEK_SET);
-
-    uint8_t raw[sampleCount];
-
-    fread(raw, sizeof(uint8_t), sampleCount, file);
-
-    for (int i = 0; i < sampleCount; ++i)
-      output[i] = decodeALawSample(raw[i]);
+    // long location = audioDataOffset + sampleOffset;
+    //
+    // fseek(file, location, SEEK_SET);
+    //
+    // uint8_t raw[sampleCount];
+    //
+    // fread(raw, sizeof(uint8_t), sampleCount, file);
+    //
+    // for (int i = 0; i < sampleCount; ++i)
+    //   output[i] = decodeALawSample(raw[i]);
   }
 
   void decodeMuLaw(float *output, int sampleOffset, int sampleCount) {
 
-    long location = audioDataOffset + sampleOffset;
-
-    fseek(file, location, SEEK_SET);
-
-    uint8_t raw[sampleCount];
-
-    fread(raw, sizeof(uint8_t), sampleCount, file);
-
-    for (int i = 0; i < sampleCount; ++i)
-      output[i] = decodeMuLawSample(raw[i]);
+    // long location = audioDataOffset + sampleOffset;
+    //
+    // fseek(file, location, SEEK_SET);
+    //
+    // uint8_t raw[sampleCount];
+    //
+    // fread(raw, sizeof(uint8_t), sampleCount, file);
+    //
+    // for (int i = 0; i < sampleCount; ++i)
+    //   output[i] = decodeMuLawSample(raw[i]);
   }
 
-  void decodeSamples(float *output, int sampleOffset, int sampleCount) {
+  void decideDecoderFn() {
 
     switch (audioType) {
 
     case AudioType::PCM8:
-      decodePCM8(output, sampleOffset, sampleCount);
+      decodeFn = [](WavCodec *self, float *o, int off, int c) {
+        self->decodePCM8(o, off, c);
+      };
       break;
 
     case AudioType::PCM16:
-      decodePCM16(output, sampleOffset, sampleCount);
+      decodeFn = [](WavCodec *self, float *o, int off, int c) {
+        self->decodePCM16(o, off, c);
+      };
       break;
 
     case AudioType::PCM24:
-      decodePCM24(output, sampleOffset, sampleCount);
+      decodeFn = [](WavCodec *self, float *o, int off, int c) {
+        self->decodePCM24(o, off, c);
+      };
       break;
 
     case AudioType::PCM32:
-      decodePCM32(output, sampleOffset, sampleCount);
+      decodeFn = [](WavCodec *self, float *o, int off, int c) {
+        self->decodePCM32(o, off, c);
+      };
       break;
 
     case AudioType::IEEE:
-      decodeIEEEFloat(output, sampleOffset, sampleCount);
+      decodeFn = [](WavCodec *self, float *o, int off, int c) {
+        self->decodeIEEEFloat(o, off, c);
+      };
       break;
 
     case AudioType::ALAW_CODEC:
-      decodeALaw(output, sampleOffset, sampleCount);
+      decodeFn = [](WavCodec *self, float *o, int off, int c) {
+        self->decodeALaw(o, off, c);
+      };
       break;
 
     case AudioType::MULAW_CODEC:
-      decodeMuLaw(output, sampleOffset, sampleCount);
+      decodeFn = [](WavCodec *self, float *o, int off, int c) {
+        self->decodeMuLaw(o, off, c);
+      };
       break;
     }
   }
@@ -355,127 +383,146 @@ private:
 
     std::lock_guard<std::mutex> lock(queueMutex);
 
-    while (!queue.empty())
-      queue.pop();
+    ringBufferHead = 0;
+    ringBufferTail = 0;
+    ringBufferSize = 0;
+    // while (!queue.empty())
+    //   queue.pop();
   }
 
   void decoderWorker() {
-
     int localFrame = playbackState.currentFrameIndex.load();
-
-    int sampleOffset = localFrame * channels;
+    size_t sampleOffset = localFrame * channels;
 
     while (!playbackState.stopRequested.load()) {
-
-      if (playbackState.seekRequested.exchange(false)) {
-        flushQueue();
-
+      // 1. SAFE SYNCHRONIZED SEEK CHECK
+      if (playbackState.seekRequested.load()) {
+        flushQueue(); // Resets ring indicators under lock
         localFrame = playbackState.seekFrame.load();
-
         playbackState.currentFrameIndex.store(localFrame);
-
         sampleOffset = localFrame * channels;
       }
 
+      size_t targetSlot = 0;
       {
         std::unique_lock<std::mutex> lock(queueMutex);
-
         queueNotFull.wait(lock, [&]() {
-          return queue.size() < MAX_QUEUE_BUFFERS ||
-                 playbackState.stopRequested.load();
+          return ringBufferSize < MAX_QUEUE_BUFFERS ||
+                 playbackState.stopRequested.load() ||
+                 playbackState.seekRequested.load();
         });
 
         if (playbackState.stopRequested.load())
           break;
+
+        if (playbackState.seekRequested.load())
+          continue; // Instantly loops back up to handle the seek offset
+                    // position safely
+
+        targetSlot = ringBufferHead;
       }
 
       if (sampleOffset >= totalSamples)
         break;
 
-      int sampleCount =
-          std::min(DECODE_BUFFER_SAMPLES, totalSamples - sampleOffset);
+      int sampleCount = std::min(static_cast<size_t>(DECODE_BUFFER_SAMPLES),
+                                 totalSamples - sampleOffset);
 
-      AudioChunk chunk;
-
-      chunk.samples.resize(sampleCount);
-
-      decodeSamples(chunk.samples.data(), sampleOffset, sampleCount);
-
-      chunk.frames = sampleCount / channels;
+      decodeFn(this, ringBuffer[targetSlot].samples, sampleOffset, sampleCount);
+      ringBuffer[targetSlot].frames = sampleCount / channels;
 
       {
         std::lock_guard<std::mutex> lock(queueMutex);
-
-        queue.push(std::move(chunk));
+        ringBufferHead = (ringBufferHead + 1) % MAX_QUEUE_BUFFERS;
+        ringBufferSize++;
       }
 
       queueNotEmpty.notify_one();
-
       sampleOffset += sampleCount;
     }
-
-    queueNotEmpty.notify_all();
   }
 
   void playbackWorker() {
-
     while (!playbackState.stopRequested.load()) {
-
-      AudioChunk chunk;
+      size_t targetSlot = 0;
 
       {
         std::unique_lock<std::mutex> lock(queueMutex);
-
         queueNotEmpty.wait(lock, [&]() {
-          return !queue.empty() || playbackState.stopRequested.load();
+          return (ringBufferSize > 0 && !playbackState.isPaused.load() &&
+                  !playbackState.seekRequested.load()) ||
+                 playbackState.stopRequested.load() ||
+                 playbackState.seekRequested.load();
         });
 
         if (playbackState.stopRequested.load())
           break;
 
-        chunk = std::move(queue.front());
-
-        queue.pop();
-      }
-
-      queueNotFull.notify_one();
-
-      if (playbackState.seekRequested.load()) {
-        snd_pcm_drop(pcmHandle);
-
-        snd_pcm_prepare(pcmHandle);
-
-        continue;
-      }
-
-      const float *data = chunk.samples.data();
-
-      int remainingFrames = chunk.frames;
-
-      while (remainingFrames > 0 && !playbackState.stopRequested.load()) {
-
-        snd_pcm_sframes_t written =
-            snd_pcm_writei(pcmHandle, data, remainingFrames);
-
-        if (written == -EPIPE) {
-          snd_pcm_prepare(pcmHandle);
-
+        // 2. CRITICAL FIX: Intercept seek requests immediately and purge
+        // hardware pipelines
+        if (playbackState.seekRequested.load()) {
+          snd_pcm_drop(pcmHandle); // Instantly stops audio output on hardware
+          snd_pcm_prepare(pcmHandle); // Readies ALSA for fresh PCM streams
+          playbackState.seekRequested.store(false); // Clear request token
+          queueNotFull.notify_all(); // Wake decoder to fill the empty slot
           continue;
         }
 
-        if (written < 0) {
-          snd_pcm_prepare(pcmHandle);
+        if (playbackState.isPaused.load()) {
+          lock.unlock();
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+          continue;
+        }
 
+        targetSlot = ringBufferTail;
+      }
+
+      const float *data = ringBuffer[targetSlot].samples;
+      int remainingFrames = ringBuffer[targetSlot].frames;
+
+      // 3. Crisp Micro-Period Feeding Loop
+      while (remainingFrames > 0 && !playbackState.stopRequested.load() &&
+             !playbackState.isPaused.load() &&
+             !playbackState.seekRequested.load()) {
+        int framesToSubmit = std::min(512, remainingFrames);
+
+        snd_pcm_sframes_t written =
+            snd_pcm_writei(pcmHandle, data, framesToSubmit);
+
+        if (written == -EPIPE || written < 0) {
+          snd_pcm_prepare(pcmHandle);
           continue;
         }
 
         remainingFrames -= written;
-
         data += written * channels;
-
         playbackState.currentFrameIndex.fetch_add(written);
       }
+
+      // If a seek or pause occurred mid-chunk execution, preserve the current
+      // ring slot indices
+      if (playbackState.seekRequested.load() || playbackState.isPaused.load()) {
+        continue;
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        ringBufferTail = (ringBufferTail + 1) % MAX_QUEUE_BUFFERS;
+        ringBufferSize--;
+      }
+      queueNotFull.notify_one();
+
+      // Auto-shutdown check if file has ended naturally
+      {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        if (ringBufferSize == 0 &&
+            playbackState.currentFrameIndex.load() >= totalFrames) {
+          playbackState.stopRequested.store(true);
+          break;
+        }
+      }
     }
+    playbackState.isPlaying.store(false);
   }
 
   void openALSA() {
@@ -505,40 +552,10 @@ private:
     pcmHandle = nullptr;
   }
 
-  void seek(int frame) {
-
-    if (frame < 0)
-      frame = 0;
-
-    if (frame >= totalFrames)
-      frame = totalFrames - 1;
-
-    playbackState.seekFrame.store(frame);
-
-    playbackState.seekRequested.store(true);
-  }
-
-  void stop() {
-
-    playbackState.stopRequested.store(true);
-
-    queueNotEmpty.notify_all();
-    queueNotFull.notify_all();
-
-    if (decodeThread.joinable())
-      decodeThread.join();
-
-    if (playbackThread.joinable())
-      playbackThread.join();
-
-    closeALSA();
-
-    playbackState.isPlaying.store(false);
-  }
-
 public:
   WavCodec(const char *filename) {
 
+    // file.open(filename, std::ios::binary);
     file = fopen(filename, "rb");
 
     if (!file)
@@ -546,6 +563,7 @@ public:
 
     RIFF_Header riff;
 
+    // file.read(reinterpret_cast<char *>(&riff), sizeof(RIFF_Header));
     fread(&riff, sizeof(RIFF_Header), 1, file);
 
     if (memcmp(riff.riff, "RIFF", 4) || memcmp(riff.wave, "WAVE", 4)) {
@@ -556,14 +574,17 @@ public:
 
       Chunk_Header chunk;
 
+      // if (!file.read(reinterpret_cast<char *>(&chunk), sizeof(chunk)))
       if (fread(&chunk, sizeof(chunk), 1, file) != 1)
         break;
 
-      long chunkStart = ftell(file);
+      // std::streamoff chunkStart = file.tellg();
+      size_t chunkDataStart = ftell(file);
 
       if (memcmp(chunk.id, "fmt ", 4) == 0) {
         FMT_Header fmt;
 
+        // file.read(reinterpret_cast<char *>(&fmt), sizeof(fmt));
         fread(&fmt, sizeof(fmt), 1, file);
 
         audioFormat = fmt.audio_format;
@@ -579,6 +600,7 @@ public:
         if (audioFormat == AudioFormat::EXTENSIBLE) {
           FMT_Extensible ext;
 
+          // file.read(reinterpret_cast<char *>(&ext), sizeof(ext));
           fread(&ext, sizeof(ext), 1, file);
 
           if (isPCMGuid(ext.subFormat)) {
@@ -590,6 +612,7 @@ public:
       }
 
       else if (memcmp(chunk.id, "data", 4) == 0) {
+        // audioDataOffset = file.tellg();
         audioDataOffset = ftell(file);
 
         audioDataSize = chunk.size;
@@ -599,10 +622,12 @@ public:
         totalSamples = totalFrames * channels;
       }
 
-      fseek(file, chunkStart + chunk.size + (chunk.size & 1), SEEK_SET);
+      // file.seekg(chunkStart + chunk.size + (chunk.size & 1), std::ios::beg);
+      fseek(file, chunkDataStart + chunk.size + (chunk.size & 1), SEEK_SET);
     }
 
     detectAudioType();
+    decideDecoderFn();
   }
 
   ~WavCodec() {
@@ -611,49 +636,166 @@ public:
 
     if (file) {
 
+      // file.close();
       fclose(file);
-
       file = nullptr;
     }
   }
 
-  void playback() {
+  void seek(int frame) {
+    if (frame < 0)
+      frame = 0;
+    if (frame >= totalFrames)
+      frame = totalFrames - 1;
 
+    // 1. Force the frame position index immediately
+    playbackState.seekFrame.store(frame);
+    playbackState.seekRequested.store(true);
+
+    // 2. If the playback engine had terminated because it hit the end, wake it
+    // up now
+    if (!playbackState.isPlaying.load()) {
+      // Force the playback frame index variable directly so playback() reads
+      // from here
+      playbackState.currentFrameIndex.store(frame);
+      playback();
+    } else {
+      // 3. Thread pool is alive; broadcast to wake them from conditional sleeps
+      std::lock_guard<std::mutex> lock(queueMutex);
+      queueNotFull.notify_all();
+      queueNotEmpty.notify_all();
+    }
+  }
+  // void seek(int frame) {
+  //   if (frame < 0)
+  //     frame = 0;
+  //   if (frame >= totalFrames)
+  //     frame = totalFrames - 1;
+  //
+  //   // 1. Store the request variables safely
+  //   playbackState.seekFrame.store(frame);
+  //   playbackState.seekRequested.store(true);
+  //
+  //   // 2. Wake up any active thread waiting on conditional variables
+  //   {
+  //     std::lock_guard<std::mutex> lock(queueMutex);
+  //     queueNotFull.notify_all();
+  //     queueNotEmpty.notify_all();
+  //   }
+  //
+  //   // 3. FIX FOR FINISHED PLAYBACK: If the song hit the end and threads
+  //   died,
+  //   // we must clean up and re-launch the workers to start streaming again.
+  //   if (!playbackState.isPlaying.load()) {
+  //     playback();
+  //   } else {
+  //     // If the decoder thread finished and exited early but playback was
+  //     still
+  //     // draining, re-spawn the decoder thread so it can fulfill the seek
+  //     // request.
+  //     std::lock_guard<std::mutex> lock(queueMutex);
+  //     if (decodeThread.joinable() && !playbackState.stopRequested.load()) {
+  //       // We only join if it's dead/finished. A quick check if it's still
+  //       // alive: If it exited naturally, we must re-start it. To do this
+  //       safely
+  //       // without complex tracking, we let the playbackWorker handle it, or
+  //       // just ensure playback() checks handles it. Let's make sure it
+  //       boots: if (playbackState.currentFrameIndex.load() >= totalFrames) {
+  //         if (decodeThread.joinable())
+  //           decodeThread.join();
+  //         playbackState.stopRequested.store(false);
+  //         decodeThread = std::thread(&WavCodec::decoderWorker, this);
+  //       }
+  //     }
+  //   }
+  // }
+
+  void playback() {
+    // If already running, do nothing
     if (playbackState.isPlaying.exchange(true)) {
       return;
     }
 
     playbackState.stopRequested.store(false);
-
     playbackState.seekRequested.store(false);
+    playbackState.isPaused.store(false);
+
+    // Completely clear out old indices before booting up
+    flushQueue();
 
     openALSA();
 
+    // Re-instantiate the background workers
     decodeThread = std::thread(&WavCodec::decoderWorker, this);
-
     playbackThread = std::thread(&WavCodec::playbackWorker, this);
 
-    decodeThread.join();
+    // DETACH FOR SMOOTH LIFECYCLE:
+    // This allows the threads to naturally die and disappear when the song ends
+    // without requiring the main thread to call .join() and freeze user
+    // controls.
+    decodeThread.detach();
+    playbackThread.detach();
+  }
+  // void playback() {
+  //   // If the threads already died naturally from finishing, join them clean
+  //   // before spinning up again
+  //   if (!playbackState.isPlaying.load()) {
+  //     if (decodeThread.joinable())
+  //       decodeThread.join();
+  //     if (playbackThread.joinable())
+  //       playbackThread.join();
+  //   }
+  //
+  //   if (playbackState.isPlaying.exchange(true)) {
+  //     return;
+  //   }
+  //
+  //   playbackState.stopRequested.store(false);
+  //   playbackState.seekRequested.store(false);
+  //   playbackState.isPaused.store(false);
+  //
+  //   // Reset ring indices completely on fresh boot
+  //   flushQueue();
+  //
+  //   openALSA();
+  //
+  //   decodeThread = std::thread(&WavCodec::decoderWorker, this);
+  //   playbackThread = std::thread(&WavCodec::playbackWorker, this);
+  // }
 
-    {
-      std::unique_lock<std::mutex> lock(queueMutex);
-
-      queueNotEmpty.wait(lock, [&]() { return queue.empty(); });
-    }
+  void stop() {
+    if (!playbackState.isPlaying.load())
+      return;
 
     playbackState.stopRequested.store(true);
+    playbackState.isPaused.store(false);
 
-    queueNotEmpty.notify_all();
-    queueNotFull.notify_all();
+    // Broadcast wakeups to break any active condition variable locks
+    {
+      std::lock_guard<std::mutex> lock(queueMutex);
+      queueNotEmpty.notify_all();
+      queueNotFull.notify_all();
+    }
 
-    if (playbackThread.joinable()) {
-      playbackThread.join();
+    // Fast, non-blocking spin wait for the detached loops to finish dropping
+    // data
+    while (playbackState.isPlaying.load()) {
+      std::this_thread::yield();
     }
 
     closeALSA();
-
-    playbackState.isPlaying.store(false);
   }
+
+  void togglePause() {
+    bool paused = !playbackState.isPaused.load();
+    playbackState.isPaused.store(paused);
+
+    // Wake up both threads so they instantly realize the pause state changed
+    queueNotEmpty.notify_all();
+    queueNotFull.notify_all();
+  }
+
+  bool isPaused() const { return playbackState.isPaused.load(); }
 
   int getSampleRate() const { return sampleRate; }
 
