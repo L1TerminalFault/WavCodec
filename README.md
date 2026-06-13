@@ -1,1 +1,2 @@
-usage: wavcodec <wav-file>
+> [!TIP]
+> Usage: wavcodec \<wav-file\>
