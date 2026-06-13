@@ -24,13 +24,6 @@ enum AudioFormat : int {
   EXTENSIBLE = 0xFFFE
 };
 
-enum PCMSubFormat : int {
-  PCM_8_BIT = 1,
-  PCM_16_BIT = 2,
-  PCM_24_BIT = 3,
-  PCM_32_BIT = 4
-};
-
 enum AudioType : int {
   PCM8 = 0,
   PCM16,
@@ -170,21 +163,24 @@ private:
 
       switch (bytesPerSample) {
 
-      case PCM_8_BIT:
+      case 1:
         audioType = AudioType::PCM8;
         break;
 
-      case PCM_16_BIT:
+      case 2:
         audioType = AudioType::PCM16;
         break;
 
-      case PCM_24_BIT:
+      case 3:
         audioType = AudioType::PCM24;
         break;
 
-      default:
+      case 4:
         audioType = AudioType::PCM32;
         break;
+
+      default:
+        throw std::runtime_error("Unsupported PCM bit depth");
       }
 
       break;
