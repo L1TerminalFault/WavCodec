@@ -1,2 +1,3 @@
 > [!TIP]
-> Usage: wavcodec \<wav-file\>
+> Compilation: `mkdir build && cd build && cmake .. && cmake --build .`
+> Usage: `wavcodec <wav-file>`
